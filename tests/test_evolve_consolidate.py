@@ -194,8 +194,8 @@ def test_high_similarity_without_negation_keeps_both_rows(tmp_path):
 def test_lessons_accumulate_and_never_supersede(tmp_path):
     backend, _settings = make(tmp_path)
     s1 = new_ulid()
-    evidence_one = {"turn_id": "T01", "tool": "shell__run", "claim": "exit 1"}
-    evidence_two = {"turn_id": "T02", "tool": "fs__read", "claim": "ENOENT"}
+    evidence_one = {"turn_id": "T01", "tool": "shell__run", "result_digest": "sha256:aa11", "claim": "exit 1"}
+    evidence_two = {"turn_id": "T02", "tool": "fs__read", "result_digest": "sha256:bb22", "claim": "ENOENT"}
 
     stage(
         backend,
@@ -243,7 +243,7 @@ def test_lesson_without_embedding_is_not_promoted(tmp_path):
         None,
         0.5,
         kind="lesson",
-        evidence={"turn_id": "T01", "claim": "cache stale"},
+        evidence={"turn_id": "T01", "tool": "fs__read", "result_digest": "sha256:cc33", "claim": "cache stale"},
     )
 
     stats = consolidate(backend, enabled(), clock=Clock(), embedder=None)

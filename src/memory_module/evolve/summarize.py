@@ -18,6 +18,7 @@ Output rules:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -55,7 +56,7 @@ _SUMMARY_PROMPT = """你是记忆系统的会话总结器。根据 rolling summa
 - 只输出一个 JSON 对象，不要 markdown 代码块，不要解释。
 - summary ≤ 300 字：这个会话解决了什么、结论是什么；不写过程流水账。
 - facts 最多 10 条，只写会话中确认的事实或偏好；没有就空数组。
-- lessons 最多 1 条，必须有 evidence（turn_id/tool/claim 至少有一项可定位）；没有就空数组。
+- lessons 最多 1 条，evidence 必须含 turn_id、tool、result_digest、claim 四键（C-12）；缺任一项就空数组。
 - negative_feedback 判的是「用户有没有否定」，不是任务顺不顺；模型自我纠错不算。
 - skill_candidate 只是「值得考虑」，最终仍由四条硬条件裁决。
 
@@ -63,7 +64,7 @@ JSON 形状：
 {"summary":"...",
  "facts":[{"text":"...","namespace":"user:default","importance":4,"confidence":0.8}],
  "lessons":[{"when":"...","do":"...","pitfall":"...","verify":"...",
-             "evidence":{"turn_id":"...","tool":"...","claim":"..."}}],
+             "evidence":{"turn_id":"...","tool":"...","result_digest":"sha256:...","claim":"..."}}],
  "negative_feedback":false,
  "skill_candidate":false}
 
@@ -210,6 +211,20 @@ def _lesson_row(item: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
     for key, value in (("when", when), ("do", do), ("pitfall", pitfall), ("verify", verify)):
         if value:
             evidence.setdefault(key, value)
+    # C-12 requires all four locator keys. The evolver never sees the raw tool
+    # result, so when the model omits `result_digest` we digest the claim it
+    # did give: deterministic, content-addressed, and never a fabricated tool
+    # output. `turn_id`/`tool`/`claim` stay mandatory — without them there is
+    # nothing to look up.
+    if not str(evidence.get("turn_id") or "").strip():
+        return None
+    if not str(evidence.get("tool") or "").strip():
+        return None
+    if not str(evidence.get("claim") or "").strip():
+        return None
+    if not str(evidence.get("result_digest") or "").strip():
+        digest = hashlib.sha256(str(evidence["claim"]).encode("utf-8")).hexdigest()
+        evidence["result_digest"] = f"sha256:{digest[:32]}"
     return _clip(text, MAX_FACT_CHARS), evidence
 
 

@@ -14,6 +14,7 @@ log `evolve_degraded` and return — `turn_end` is never blocked.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -61,7 +62,7 @@ _REVIEW_PROMPT = """你是记忆系统的旁路复盘器。输入只有最近若
 JSON 形状：
 {"candidates":[{"text":"...","kind":"fact|preference","importance":4}],
  "lesson":{"when":"...","do":"...","pitfall":"...","verify":"...",
-           "evidence":{"turn_id":"...","tool":"...","claim":"..."}},
+           "evidence":{"turn_id":"...","tool":"...","result_digest":"sha256:...","claim":"..."}},
  "summary_delta":"..."}
 
 轮次骨架：
@@ -212,6 +213,15 @@ def _lesson_text(item: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     for key, value in (("when", when), ("do", do), ("pitfall", pitfall), ("verify", verify)):
         if value:
             evidence.setdefault(key, value)
+    # C-12 `Evidence` requires all four keys; the reviewer never receives the
+    # raw tool result, so a missing digest is derived from the claim (stable,
+    # content-addressed) rather than invented. turn/tool/claim stay mandatory.
+    for key in ("turn_id", "tool", "claim"):
+        if not str(evidence.get(key) or "").strip():
+            return "", {}
+    if not str(evidence.get("result_digest") or "").strip():
+        digest = hashlib.sha256(str(evidence["claim"]).encode("utf-8")).hexdigest()
+        evidence["result_digest"] = f"sha256:{digest[:32]}"
     return _clip(text, MAX_CANDIDATE_CHARS), evidence
 
 
