@@ -12,6 +12,7 @@ model until it is true (M4b §九: "enabled=false → 不订阅、不消费、�
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
@@ -222,6 +223,30 @@ class EvolveSettings:
             else:  # pragma: no cover - _KNOWN_KEYS and the buckets must agree
                 raise ValueError(f"unhandled [evolve] key {key!r}")
         return cls(**kwargs)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "EvolveSettings":
+        """Read the `[evolve]` table from `MEMORY_EVOLVE_<KEY>` environment vars.
+
+        The module receives no TOML path (core owns `core.toml`), so deployment
+        maps the same C-18 keys with a prefix: `MEMORY_EVOLVE_ENABLED=1`,
+        `MEMORY_EVOLVE_NUDGE_INTERVAL=10`, `MEMORY_EVOLVE_REDACT=tool_args,file_content`.
+        Unknown `MEMORY_EVOLVE_*` names are ignored here and left to core's
+        schema check; values that *are* known still go through `from_mapping`,
+        so a typo in a value fails loudly.
+        """
+        source = dict(os.environ if env is None else env)
+        raw: dict[str, Any] = {}
+        for key in _KNOWN_KEYS:
+            name = f"MEMORY_EVOLVE_{key.upper()}"
+            if name not in source:
+                continue
+            value = source[name]
+            if key in _TUPLE_KEYS:
+                raw[key] = [part.strip() for part in value.split(",") if part.strip()]
+            else:
+                raw[key] = value
+        return cls.from_mapping(raw)
 
     # ---------------------------------------------------------------- budgets
     def summary_token_budget(self, context_tokens: int = DEFAULT_CONTEXT_TOKENS) -> int:

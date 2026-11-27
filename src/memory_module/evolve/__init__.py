@@ -6,7 +6,7 @@ Five triggers, all deterministic and all switchable (M4b §四):
 * `turn_review`— `review.py`, skeletons every `nudge_interval` turns → staging;
 * `session_close` — `summarize.py`, rolling summary + tail → session/staging;
 * `consolidate`— `consolidate.py`, cluster/promote/conflict/decay;
-* `skill_evolve`— `skillgen.py` (not in this delivery).
+* `skill_evolve`— `skillgen.py`, a C-13 proposal that is never auto-installed.
 
 `pipeline.EvolvePipeline` wires them for `worker.py`; `config.EvolveSettings`
 is the only reader of the C-18 `[evolve]` table. Everything here talks to
@@ -21,12 +21,20 @@ from .pipeline import EvolvePipeline
 from .review import ReviewOutcome, Skeleton, TurnReviewer, build_skeleton
 from .rules import RuleCandidate, TurnExtraction, extract_from_payload, extract_turn
 from .scheduler import ConsolidateScheduler
+from .skillgen import SkillBudget, SkillDraft, SkillGenerator, Trajectory
+from .worker import EvolveWorker, ProposalSink
 from .summarize import SessionSummarizer, SummaryOutcome
 
 __all__ = [
     "EvolveSettings",
     "EvolvePipeline",
     "ConsolidateScheduler",
+    "EvolveWorker",
+    "ProposalSink",
+    "SkillBudget",
+    "SkillDraft",
+    "SkillGenerator",
+    "Trajectory",
     "ConsolidateStats",
     "consolidate",
     "ReviewOutcome",
