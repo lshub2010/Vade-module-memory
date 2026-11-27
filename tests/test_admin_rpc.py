@@ -127,7 +127,12 @@ def test_staging_lesson_requires_evidence(tmp_path):
         [0.1] * 8,
         0.5,
         kind="lesson",
-        evidence={"turn_id": "01J00000000000000000000000", "claim": "x"},
+        evidence={
+            "turn_id": "01J00000000000000000000000",
+            "tool": "memory",
+            "result_digest": "sha256:1a2b",
+            "claim": "x",
+        },
     )
     item, _ = service.backend.admin_list(status="staging", limit=10)
     assert [row.id for row in item] == [staging_id]
@@ -226,4 +231,63 @@ def test_events_and_consolidate_watermark(tmp_path):
     assert last is not None
     assert last["kind"] == "manual"
     assert last["stats"] == {"promoted": 3}
+    service.close()
+
+
+def test_restore_respects_the_global_quota(tmp_path):
+    """Restoring must not push `global` past its capacity.
+
+    Regression (review P2-3): `admin_restore` flipped `deleted_at` without the
+    quota check a write performs, so an admin could archive/restore in a loop
+    and end up above `global_capacity` — the next real write then evicted an
+    entry nobody chose.
+    """
+    service, _ = make_service(tmp_path, global_capacity=2)
+    first = service.call_tool("remember", {"text": "第一条"})
+    service.call_tool("remember", {"text": "第二条"})
+    service.handle_rpc("memory/admin_archive", {"id": first["id"], "reason": "manual", "by": "alice"})
+    service.call_tool("remember", {"text": "第三条"})
+
+    service.handle_rpc("memory/admin_restore", {"id": first["id"], "by": "alice"})
+    stats = service.backend.admin_stats()
+    assert stats["global_count"] <= 2, stats
+    service.close()
+
+
+def test_purge_keeps_recoverable_archive_rows(tmp_path):
+    """Only `forget` rows are physically purged; quota/admin archives stay.
+
+    Regression (review P2-2): `purge_deleted` deleted every soft-deleted row
+    after 7 days, leaving an `archive` row that `admin_restore` could no longer
+    revive.
+    """
+    service, clock = make_service(tmp_path)
+    forgotten = service.call_tool("remember", {"text": "会被真正删掉"})
+    service.call_tool("forget", {"id": forgotten["id"]})
+    archived = service.call_tool("remember", {"text": "归档后仍可恢复"})
+    service.handle_rpc("memory/admin_archive", {"id": archived["id"], "reason": "manual", "by": "alice"})
+
+    for _ in range(8 * 86400):
+        clock()
+
+    removed = service.backend.purge_deleted()
+    assert removed == 1
+    assert service.backend.get(forgotten["id"], include_deleted=True) is None
+    assert service.backend.get(archived["id"], include_deleted=True) is not None
+    assert service.handle_rpc("memory/admin_restore", {"id": archived["id"], "by": "alice"}) == {"ok": True}
+    service.close()
+
+
+def test_recall_include_session_without_injection_is_an_error(tmp_path):
+    """`include_session=true` without ctx must fail loudly, not return global only.
+
+    Regression (review P2-4): the call silently searched only the global layer,
+    so the model believed it had seen the session context.
+    """
+    service, _ = make_service(tmp_path)
+    service.call_tool("remember", {"text": "全局记忆"})
+    with pytest.raises(MemoryFailure) as exc:
+        service.call_tool("recall", {"query": "全局记忆", "include_session": True})
+    assert exc.value.code == "INVALID_ARGUMENT"
+    assert "session_id" in exc.value.message
     service.close()

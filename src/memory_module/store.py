@@ -55,15 +55,23 @@ __all__ = [
     "new_ulid",
     "ULID_RE",
     "MAX_TEXT_BYTES",
+    "MAX_TEXT_CHARS",
 ]
 
 LAYERS = ("session", "global")
 KINDS = ("fact", "preference", "lesson")
 SOURCES = ("user", "evolve", "import")
 STATUSES = ("active", "archived", "superseded")
-MAX_TEXT_BYTES = 8 * 1024
+#: C-12 counts *characters* (`text_max_chars: 8192`). The old byte-based cap
+#: rejected a legal 8192-character CJK entry, so the contract is the authority
+#: here and `MAX_TEXT_BYTES` survives only as a coarse transport sanity bound.
+MAX_TEXT_CHARS = 8 * 1024
+MAX_TEXT_BYTES = 4 * MAX_TEXT_CHARS
 MAX_TAGS = 16
 MAX_TAG_CHARS = 32
+#: C-12 `Evidence` required keys; a lesson without a locatable turn is not a
+#: lesson, it is an opinion.
+_EVIDENCE_KEYS = ("turn_id", "tool", "result_digest", "claim")
 
 ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9:_-]{0,63}$")
@@ -636,12 +644,23 @@ class SqliteBackend:
             raise MemoryFailure("INVALID_ARGUMENT", f"source must be one of {list(SOURCES)}")
         if not isinstance(rec.text, str) or not rec.text.strip():
             raise MemoryFailure("INVALID_ARGUMENT", "text must be a non-empty string")
-        if len(rec.text.encode("utf-8")) > MAX_TEXT_BYTES:
-            raise MemoryFailure("PAYLOAD_TOO_LARGE", f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+        if len(rec.text) > MAX_TEXT_CHARS:
+            raise MemoryFailure("PAYLOAD_TOO_LARGE", f"text exceeds {MAX_TEXT_CHARS} characters")
         if rec.kind == "lesson" and not rec.evidence:
             raise MemoryFailure("INVALID_ARGUMENT", "kind=lesson requires non-empty evidence")
         if rec.evidence is not None and not isinstance(rec.evidence, dict):
             raise MemoryFailure("INVALID_ARGUMENT", "evidence must be an object")
+        if rec.evidence is not None:
+            # C-12 `Evidence` is closed and requires all four keys. Checking only
+            # "a non-empty dict" let `{"foo": 1}` into the table and then fail
+            # schema validation on the admin page — the row existed but was
+            # unrepresentable.
+            missing = [key for key in _EVIDENCE_KEYS if not str(rec.evidence.get(key) or "").strip()]
+            if missing:
+                raise MemoryFailure(
+                    "INVALID_ARGUMENT",
+                    f"evidence must carry non-empty {', '.join(_EVIDENCE_KEYS)}; missing {', '.join(missing)}",
+                )
         if not (1.0 <= float(rec.importance) <= 5.0):
             raise MemoryFailure("INVALID_ARGUMENT", "importance must be within [1, 5]")
         if not (0.0 <= float(rec.confidence) <= 1.0):
@@ -651,6 +670,10 @@ class SqliteBackend:
         for tag in rec.tags:
             if not isinstance(tag, str) or len(tag) > MAX_TAG_CHARS:
                 raise MemoryFailure("INVALID_ARGUMENT", f"each tag must be a string of at most {MAX_TAG_CHARS} characters")
+        if len(set(rec.tags)) != len(rec.tags):
+            # C-12 declares `uniqueItems: true`; a duplicate tag made the row
+            # pass the store but fail contract validation downstream.
+            raise MemoryFailure("INVALID_ARGUMENT", "tags must be unique")
         if rec.layer == "global":
             if rec.session_id != "":
                 raise MemoryFailure("INVALID_ARGUMENT", "global records must have an empty session_id")
@@ -1104,7 +1127,18 @@ class SqliteBackend:
                     "a forgotten memory cannot be restored; the archive copy is audit-only",
                 )
             with self._tx():
+                # Restoring a global row must respect the same quota as a write:
+                # otherwise repeated restore/archive cycles push the table past
+                # `global_capacity` and the next real write evicts something the
+                # admin never chose. Eviction here archives (not deletes) the
+                # lowest-scored live rows, exactly like `put`.
+                removed: list[MemoryRecord] = []
+                if str(row["layer"]) == "global":
+                    removed = self._ensure_global_space_locked()
                 self._conn.execute("UPDATE memories SET deleted_at=NULL WHERE id=?", (mem_id,))
+            for old in removed:
+                if old.id != mem_id:
+                    self._forget_from_memory(old.id)
             rec = _row_to_record(row)
             rec.deleted_at = None
             rec.status = derive_status(rec)
@@ -1149,8 +1183,8 @@ class SqliteBackend:
     ) -> str:
         if not isinstance(text, str) or not text.strip():
             raise MemoryFailure("INVALID_ARGUMENT", "text must be a non-empty string")
-        if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
-            raise MemoryFailure("PAYLOAD_TOO_LARGE", f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+        if len(text) > MAX_TEXT_CHARS:
+            raise MemoryFailure("PAYLOAD_TOO_LARGE", f"text exceeds {MAX_TEXT_CHARS} characters")
         if not NAMESPACE_RE.match(namespace or ""):
             raise MemoryFailure("INVALID_ARGUMENT", "namespace violates ^[a-z0-9][a-z0-9:_-]{0,63}$")
         if kind not in KINDS:
@@ -1159,6 +1193,16 @@ class SqliteBackend:
             raise MemoryFailure("INVALID_ARGUMENT", "kind=lesson requires non-empty evidence")
         if evidence is not None and not isinstance(evidence, dict):
             raise MemoryFailure("INVALID_ARGUMENT", "evidence must be an object")
+        if evidence is not None:
+            # Same C-12 `Evidence` shape as a live row: a staging lesson that
+            # would fail contract validation must be rejected here, not promoted
+            # into an unrepresentable global row.
+            missing = [key for key in _EVIDENCE_KEYS if not str(evidence.get(key) or "").strip()]
+            if missing:
+                raise MemoryFailure(
+                    "INVALID_ARGUMENT",
+                    f"evidence must carry non-empty {', '.join(_EVIDENCE_KEYS)}; missing {', '.join(missing)}",
+                )
         if not (0.0 <= float(confidence) <= 1.0):
             raise MemoryFailure("INVALID_ARGUMENT", "confidence must be within [0, 1]")
         if embedding is not None:
@@ -1376,13 +1420,26 @@ class SqliteBackend:
             return removed
 
     def purge_deleted(self, now: int | None = None) -> int:
-        """Physically remove rows whose `deleted_at` is older than 7 days."""
+        """Physically remove rows whose `deleted_at` is older than 7 days.
+
+        Only `forget` rows qualify. `quota` eviction and admin `archive` are
+        *recoverable* by contract (D44 / C-16 `restore`), so purging them would
+        leave an `archive` audit row that `admin_restore` can no longer revive —
+        the admin page would show an entry, then answer NOT_FOUND on restore.
+        Session TTL never reaches here: `purge_expired` deletes those rows
+        without writing `archive`.
+        """
         now = int(self._clock()) if now is None else int(now)
         cutoff = now - 7 * 86400
         with self._lock:
             with self._tx():
                 cursor = self._conn.execute(
-                    "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,)
+                    """
+                    DELETE FROM memories
+                     WHERE deleted_at IS NOT NULL AND deleted_at < ?
+                       AND id IN (SELECT id FROM archive WHERE reason='forget')
+                    """,
+                    (cutoff,),
                 )
                 return int(cursor.rowcount)
 

@@ -142,6 +142,14 @@ def _default_transport(request: urllib.request.Request, timeout: float) -> tuple
         return int(exc.code), exc.read() or b""
     except urllib.error.URLError as exc:
         raise EmbeddingError(f"embedding endpoint is unreachable: {exc.reason}") from None
+    except (TimeoutError, OSError) as exc:
+        # `urllib` surfaces a socket read timeout as bare `TimeoutError` (not
+        # `URLError`), and a reset mid-body as `OSError`. Both mean "the
+        # provider did not answer", which is retryable — letting them escape
+        # made the SDK map the call to INTERNAL and core stopped retrying.
+        raise EmbeddingError(
+            "embedding endpoint timed out or dropped the connection", code="UNAVAILABLE"
+        ) from None
 
 
 class OpenAIEmbeddingClient:

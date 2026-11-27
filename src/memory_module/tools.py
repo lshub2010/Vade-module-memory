@@ -26,6 +26,7 @@ from .store import (
     MAX_TAG_CHARS,
     MAX_TAGS,
     MAX_TEXT_BYTES,
+    MAX_TEXT_CHARS,
     NAMESPACE_RE,
     ULID_RE,
     MemoryBackend,
@@ -58,11 +59,12 @@ def validate_text(value: Any, *, field: str = "text") -> str:
     text = _require_str(value, field)
     if not text.strip():
         raise ToolFailure("INVALID_ARGUMENT", f"{field} must not be empty")
-    size = len(text.encode("utf-8"))
-    if size > MAX_TEXT_BYTES:
+    # C-12 caps characters, not bytes: 8192 CJK characters are legal and used
+    # to be rejected by the byte count.
+    if len(text) > MAX_TEXT_CHARS:
         raise ToolFailure(
             "PAYLOAD_TOO_LARGE",
-            f"{field} is {size} UTF-8 bytes; the per-memory limit is {MAX_TEXT_BYTES}",
+            f"{field} is {len(text)} characters; the per-memory limit is {MAX_TEXT_CHARS}",
         )
     return text
 
@@ -258,9 +260,15 @@ class MemoryTools:
         with_superseded = _require_bool(include_superseded, "include_superseded")
         session_id = self._session.get() if with_session else None
         if with_session and session_id is None:
-            # No injection means no session layer: returning global results is
-            # safer than inventing a session. The caller can tell from `layer`.
-            session_id = None
+            # `include_session=true` is an explicit request for the current
+            # session's layer. Silently returning global-only results makes the
+            # model believe it saw the session context; an error is the only
+            # honest answer, and the caller can retry without the flag.
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "include_session=true requires an injected session_id; "
+                "this call arrived without one, so the session layer cannot be searched",
+            )
 
         vec = self._embed(body)
         records = self.backend.search(

@@ -152,7 +152,20 @@ def test_lesson_requires_evidence_and_starts_unverified(tmp_path):
         service.backend.put(lesson)
     assert exc.value.code == "INVALID_ARGUMENT"
 
+    # C-12 `Evidence` is closed and requires all four keys: a partial dict is
+    # still not evidence (a lesson without a locatable result is an opinion).
     lesson.evidence = {"turn_id": "01J00000000000000000000000", "tool": "memory", "claim": "验证前不要清空"}
+    with pytest.raises(MemoryFailure) as exc:
+        service.backend.put(lesson)
+    assert exc.value.code == "INVALID_ARGUMENT"
+    assert "result_digest" in exc.value.message
+
+    lesson.evidence = {
+        "turn_id": "01J00000000000000000000000",
+        "tool": "memory",
+        "result_digest": "sha256:9f2c",
+        "claim": "验证前不要清空",
+    }
     lesson_id = service.backend.put(lesson)
     stored = service.backend.get(lesson_id)
     assert stored is not None
