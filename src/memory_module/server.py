@@ -27,6 +27,10 @@ from typing import Any, Callable, Mapping, Sequence
 from . import tools as tools_module
 from .embed import EmbeddingClient, LocalHashEmbedding, OpenAIEmbeddingClient
 from .errors import MemoryFailure
+from .evolve.config import EvolveSettings
+from .evolve.pipeline import EvolvePipeline
+from .evolve.skillgen import SkillGenerator
+from .evolve.worker import EvolveWorker
 from .rpc import MEMORY_RPC_METHODS, RpcDispatcher, handle_event as dispatch_event
 from .settings import MemorySettings
 from .store import MemoryBackend, SqliteBackend
@@ -91,12 +95,36 @@ class MemoryService:
         backend: MemoryBackend | None = None,
         embedder: EmbeddingClient | None = None,
         clock: Any = None,
+        evolve: EvolveSettings | None = None,
+        llm: Any = None,
+        propose: Any = None,
+        skill_catalog: Any = None,
     ) -> None:
         self.settings = settings or MemorySettings.from_env()
         self.backend = backend or SqliteBackend(self.settings, clock=clock)
         self.embedder = embedder or build_embedder(self.settings)
         self.tools = tools_module.MemoryTools(self.backend, self.embedder, self.settings, clock=clock)
         self.rpc = RpcDispatcher(self.backend, self.settings)
+        #: M4b is optional and off by default (C-18 `[evolve].enabled=false`).
+        #: Without it, `handle_event` stays exactly M4a's TTL behaviour.
+        self.evolve = evolve
+        self.worker: EvolveWorker | None = None
+        if evolve is not None and evolve.enabled:
+            pipeline = EvolvePipeline(
+                self.backend,
+                evolve,
+                llm=llm,
+                embedder=self.embedder,
+                memory_settings=self.settings,
+                clock=clock,
+            )
+            self.worker = EvolveWorker(
+                pipeline,
+                evolve,
+                skillgen=SkillGenerator(evolve, llm=llm, clock=clock, model=str(evolve.model or "")),
+                propose=propose,
+                catalog=skill_catalog,
+            )
 
     def call_tool(
         self, name: str, args: Mapping[str, Any] | None = None, *, session_id: str | None = None
@@ -141,7 +169,22 @@ class MemoryService:
         return self.rpc.dispatch(method, params)
 
     def handle_event(self, topic: str, payload: Any = None) -> dict[str, Any]:
+        """M4a's event slice only (TTL re-base). Kept sync for existing callers."""
         return dispatch_event(self.backend, topic, payload)
+
+    async def handle_event_async(self, topic: str, payload: Any = None) -> dict[str, Any]:
+        """M4a's TTL handling **and** the M4b worker, in that order.
+
+        The TTL re-base must happen even when evolve is enabled: it is storage
+        bookkeeping, not an evolution trigger. Evolve runs after it so a closed
+        session's summary sees the same row state the TTL path just wrote.
+        """
+        result = dispatch_event(self.backend, topic, payload)
+        worker = self.worker
+        if worker is None or not worker.enabled:
+            return result
+        evolved = await worker.on_event(topic, payload)
+        return {**result, "evolve": evolved}
 
     def close(self) -> None:
         close = getattr(self.backend, "close", None)
@@ -149,8 +192,9 @@ class MemoryService:
             close()
 
 
-def build_service(settings: MemorySettings | None = None) -> MemoryService:
-    return MemoryService(settings)
+def build_service(settings: MemorySettings | None = None, **kwargs: Any) -> MemoryService:
+    """Construct the service; `evolve=`/`llm=`/`propose=` are forwarded to M4b."""
+    return MemoryService(settings, **kwargs)
 
 
 def _adapt(
@@ -206,7 +250,7 @@ def _adapt(
     return sync_call
 
 
-def _build_module_app(service: MemoryService) -> Any:
+def _build_module_app(service: Any) -> Any:
     from vade_sdk import ModuleApp, ToolSpec
 
     class _App(ModuleApp):
@@ -252,7 +296,7 @@ def _build_module_app(service: MemoryService) -> Any:
                 method,
                 lambda params, _method=method: service.handle_rpc(_method, params),
             )
-        app.on_event(lambda topic, payload: service.handle_event(topic, payload))
+        app.on_event(lambda topic, payload: service.handle_event_async(topic, payload))
     return app
 
 
@@ -274,7 +318,11 @@ class _SchemaOnlyService:
 
 def build_app(service: MemoryService | _SchemaOnlyService | None = None) -> Any:
     """Build the `ModuleApp`. The SDK is imported here, not at module import."""
-    return _build_module_app(service or build_service())
+    if service is None:
+        # `MEMORY_EVOLVE_ENABLED=1` is the only way evolve turns on; without it
+        # the service is byte-for-byte M4a (no worker, no subscription).
+        service = build_service(evolve=EvolveSettings.from_env())
+    return _build_module_app(service)
 
 
 def handle_rpc(service: MemoryService, method: str, params: Any = None) -> dict[str, Any]:
