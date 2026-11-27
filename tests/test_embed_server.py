@@ -210,6 +210,39 @@ async def test_sdk_rejects_a_forged_session_id_argument(tmp_path):
     service.close()
 
 
+async def test_sdk_registers_private_rpc_and_passes_context_session(tmp_path):
+    service = make_service(tmp_path)
+    app = build_app(service)
+    session_id = new_ulid()
+
+    envelope = await app.call_tool(
+        "remember",
+        {"text": "通过 SDK ctx 注入的会话记忆", "scope": "session"},
+        context={"session_id": session_id},
+    )
+    assert envelope["ok"] is True, envelope
+    assert len(service.backend.read_session(session_id)) == 1
+
+    stats = await app.dispatch_rpc("memory/admin_stats", {})
+    assert stats["global_count"] == 0
+    assert stats["global_limit"] >= 1
+    service.close()
+
+
+async def test_sdk_private_rpc_unknown_is_not_found(tmp_path):
+    service = make_service(tmp_path)
+    app = build_app(service)
+    from vade_sdk import ToolError
+
+    try:
+        await app.dispatch_rpc("memory/not_a_method", {})
+    except ToolError as exc:
+        assert exc.code == "NOT_FOUND"
+    else:  # pragma: no cover
+        raise AssertionError("unknown private RPC must fail")
+    service.close()
+
+
 async def test_sdk_tool_error_keeps_not_found(tmp_path):
     service = make_service(tmp_path)
     app = build_app(service)

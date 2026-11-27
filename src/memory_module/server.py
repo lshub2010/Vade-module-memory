@@ -153,27 +153,55 @@ def build_service(settings: MemorySettings | None = None) -> MemoryService:
     return MemoryService(settings)
 
 
-def _adapt(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Translate `MemoryFailure` into the SDK's `ToolError` (same code)."""
+def _adapt(
+    fn: Callable[..., Any],
+    *,
+    service: MemoryService | None = None,
+    name: str = "",
+) -> Callable[..., Any]:
+    """Translate `MemoryFailure` into the SDK's `ToolError` (same code).
+
+    When a service is present, route through `MemoryService.call_tool` so the
+    core-injected `ctx.session_id` is applied; the raw function path remains
+    for the schema-only app (manifest generation must not open SQLite).
+    """
     from vade_sdk import ToolError
+
+    def invoke(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if service is not None and name:
+            try:
+                bound = inspect.signature(fn).bind(*args, **kwargs)
+                bound.apply_defaults()
+            except TypeError as exc:
+                raise ToolError("INVALID_ARGUMENT", str(exc)) from None
+            from vade_sdk import current_call_context
+
+            ctx = current_call_context()
+            session_id = ctx.get("session_id") if isinstance(ctx, Mapping) else None
+            try:
+                return service.call_tool(
+                    name,
+                    dict(bound.arguments),
+                    session_id=session_id if isinstance(session_id, str) else None,
+                )
+            except MemoryFailure as exc:
+                raise ToolError(exc.code, exc.message) from None
+        try:
+            return fn(*args, **kwargs)
+        except MemoryFailure as exc:
+            raise ToolError(exc.code, exc.message) from None
 
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def async_call(*args: Any, **kwargs: Any) -> Any:
-            try:
-                return await fn(*args, **kwargs)
-            except MemoryFailure as exc:
-                raise ToolError(exc.code, exc.message) from None
+            return invoke(args, kwargs)
 
         return async_call
 
     @functools.wraps(fn)
     def sync_call(*args: Any, **kwargs: Any) -> Any:
-        try:
-            return fn(*args, **kwargs)
-        except MemoryFailure as exc:
-            raise ToolError(exc.code, exc.message) from None
+        return invoke(args, kwargs)
 
     return sync_call
 
@@ -211,13 +239,20 @@ def _build_module_app(service: MemoryService) -> Any:
         app.add_tool(
             ToolSpec(
                 name=name,
-                fn=_adapt(method),
+                fn=_adapt(method, service=service, name=name),
                 description=meta["description"],
                 risk=meta["risk"],
                 timeout_ms=meta["timeout_ms"],
                 idempotent=meta["idempotent"],
             )
         )
+    if hasattr(service, "handle_rpc"):
+        for method in MEMORY_RPC_METHODS:
+            app.on_rpc(
+                method,
+                lambda params, _method=method: service.handle_rpc(_method, params),
+            )
+        app.on_event(lambda topic, payload: service.handle_event(topic, payload))
     return app
 
 
