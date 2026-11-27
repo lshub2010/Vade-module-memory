@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        # vade-sdk is deliberately NOT installed here: server-adapter tests
+        # skip themselves, and the storage/tool tests must stay runnable on a
+        # bare Python (that is the module's own gate).
+        run: python -m pip install -U pip pytest
+      - name: Unit tests (no SDK needed)
+        run: python -m pytest tests -q
+      - name: Standalone self-test (no core, no network, no key)
+        run: PYTHONPATH=src python -m memory_module --self-test

@@ -1,0 +1,113 @@
+{
+  "capabilities": {
+    "tools": [
+      {
+        "description": "记住一条事实、偏好或结论；同一内容自动去重，不覆盖旧结论",
+        "idempotent": true,
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "default": "user:default",
+              "type": "string"
+            },
+            "scope": {
+              "default": "global",
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "name": "remember",
+        "risk": "low",
+        "timeout_ms": 15000
+      },
+      {
+        "description": "按语义检索长期记忆；可选叠加当前会话层",
+        "idempotent": true,
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "include_session": {
+              "default": false,
+              "type": "boolean"
+            },
+            "include_superseded": {
+              "default": false,
+              "type": "boolean"
+            },
+            "k": {
+              "default": 5,
+              "type": "integer"
+            },
+            "namespace": {
+              "default": "",
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "recall",
+        "risk": "low",
+        "timeout_ms": 15000
+      },
+      {
+        "description": "软删除一条记忆并写入归档；不可恢复（危险操作）",
+        "idempotent": false,
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "name": "forget",
+        "risk": "high",
+        "timeout_ms": 10000
+      }
+    ]
+  },
+  "concurrency": "exclusive",
+  "display_name": "记忆模块",
+  "injects": [
+    "session_id"
+  ],
+  "instance_id": "main",
+  "limits": {
+    "max_concurrency": 1,
+    "max_payload": 65519
+  },
+  "module_id": "com.example.memory",
+  "priority": 0,
+  "protocol": "vade/v1",
+  "role": "evolve",
+  "subscriptions": [
+    "session.turn",
+    "session.closed"
+  ],
+  "version": "1.0.0"
+}

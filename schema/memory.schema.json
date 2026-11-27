@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vade.dev/schema/memory.schema.json",
+  "title": "Vade memory records (C-12)",
+  "description": "Authoritative field/enum contract for the memory module's SQLite tables. M4b (evolver) and C5a (admin UI) consume this file; `embedding` is internal and is not returned by tools or admin RPCs.",
+  "version": "1.0.0",
+  "$defs": {
+    "MemoryLayer": {
+      "type": "string",
+      "enum": ["session", "global"],
+      "description": "session rows are partitioned by session_id (namespace=''); global rows by namespace (session_id='')."
+    },
+    "MemoryKind": {
+      "type": "string",
+      "enum": ["fact", "preference", "lesson"],
+      "description": "lesson requires evidence; it is the only kind allowed to promote on one observation plus evidence (D81)."
+    },
+    "MemorySource": {
+      "type": "string",
+      "enum": ["user", "evolve", "import"]
+    },
+    "MemoryStatus": {
+      "type": "string",
+      "enum": ["active", "archived", "superseded"],
+      "description": "Derived, never stored: superseded_by wins over deleted_at, then archived, else active."
+    },
+    "StagingStatus": {
+      "type": "string",
+      "const": "staging"
+    },
+    "Tags": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 32}
+    },
+    "Evidence": {
+      "type": "object",
+      "description": "Required for kind=lesson. Pointers only; never a transcript.",
+      "properties": {
+        "turn_id": {"type": "string", "minLength": 1},
+        "tool": {"type": "string"},
+        "result_digest": {"type": "string"},
+        "claim": {"type": "string", "minLength": 1}
+      },
+      "required": ["turn_id", "claim"],
+      "additionalProperties": true
+    },
+    "MemoryRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "layer",
+        "namespace",
+        "session_id",
+        "text",
+        "tags",
+        "content_hash",
+        "importance",
+        "confidence",
+        "source",
+        "kind",
+        "created_at",
+        "hit_count",
+        "supersedes",
+        "superseded_by"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$", "description": "ULID"},
+        "layer": {"$ref": "#/$defs/MemoryLayer"},
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9:_-]{0,63}$",
+          "description": "Global layer only; session layer is always ''."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Session layer only, core-injected ULID; global layer is always '' (never NULL)."
+        },
+        "text": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "tags": {"$ref": "#/$defs/Tags"},
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256(layer + NUL + session_id + NUL + namespace + NUL + normalized_text)"
+        },
+        "embedding": {
+          "type": "array",
+          "items": {"type": "number"},
+          "description": "Internal BLOB decoded for diagnostics; not returned by tools/admin RPCs.",
+          "x-vade-internal": true
+        },
+        "importance": {"type": "number", "minimum": 1, "maximum": 5, "description": "Explicit remember is 5."},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "source": {"$ref": "#/$defs/MemorySource"},
+        "kind": {"$ref": "#/$defs/MemoryKind"},
+        "evidence": {"oneOf": [{"$ref": "#/$defs/Evidence"}, {"type": "null"}]},
+        "verified_at": {"type": ["integer", "null"], "description": "NULL means a lesson is still unverified."},
+        "supersedes": {"type": ["string", "null"], "description": "The id this row replaces."},
+        "superseded_by": {"type": ["string", "null"], "description": "Soft invalidation; default recall hides this row."},
+        "hit_count": {"type": "integer", "minimum": 0},
+        "last_hit_at": {"type": ["integer", "null"]},
+        "created_at": {"type": "integer", "minimum": 0},
+        "expires_at": {"type": ["integer", "null"], "description": "Session TTL; NULL for global."},
+        "deleted_at": {"type": ["integer", "null"], "description": "Soft delete/archive marker."},
+        "promoted_by": {
+          "type": ["string", "null"],
+          "description": "evolve for automatic promotion, admin:<name> for the explicit confirmation channel."
+        }
+      }
+    },
+    "StagingRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text",
+        "namespace",
+        "kind",
+        "content_hash",
+        "seen_sessions",
+        "confidence",
+        "created_at"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:_-]{0,63}$"},
+        "kind": {"$ref": "#/$defs/MemoryKind"},
+        "evidence": {"oneOf": [{"$ref": "#/$defs/Evidence"}, {"type": "null"}]},
+        "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "seen_sessions": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+          "description": "Distinct sessions that observed this candidate; >=2 is the global promotion rule for facts."
+        },
+        "embedding": {
+          "type": ["array", "null"],
+          "items": {"type": "number"},
+          "description": "Computed at write time so consolidate can cluster without re-embedding.",
+          "x-vade-internal": true
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "created_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ArchiveRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "payload", "archived_at", "reason"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+        "payload": {"$ref": "#/$defs/MemoryRecord"},
+        "archived_at": {"type": "integer", "minimum": 0},
+        "reason": {
+          "type": "string",
+          "description": "quota | forget | decay | admin reason | M4b consolidate reason. quota/forget are written by M4a."
+        },
+        "archived_by": {"type": "string"}
+      }
+    }
+  },
+  "type": "object",
+  "properties": {
+    "memory": {"$ref": "#/$defs/MemoryRecord"},
+    "staging": {"$ref": "#/$defs/StagingRecord"},
+    "archive": {"$ref": "#/$defs/ArchiveRecord"}
+  },
+  "additionalProperties": false
+}

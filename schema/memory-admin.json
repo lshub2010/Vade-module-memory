@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vade.dev/schema/memory-admin.json",
+  "title": "Vade memory private RPCs (C-16)",
+  "description": "core -> memory module only. These methods are NOT in the tool table and are never visible to the model. Definitions are frozen with C-12 in W5. No permission logic lives here (core enforces admin sessions); no raw transcript fields exist in any response.",
+  "version": "1.0.0",
+  "x-vade": {
+    "private": true,
+    "tool_table": false,
+    "transport": "JSON-RPC 2.0 over the existing module channel",
+    "methods": [
+      "memory/read_session",
+      "memory/admin_list",
+      "memory/admin_get",
+      "memory/admin_promote",
+      "memory/admin_archive",
+      "memory/admin_restore",
+      "memory/admin_stats"
+    ]
+  },
+  "$defs": {
+    "Ulid": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+    "Layer": {"type": "string", "enum": ["session", "global", "staging"]},
+    "Status": {"type": "string", "enum": ["active", "archived", "superseded", "staging"]},
+    "MemoryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "layer",
+        "namespace",
+        "status",
+        "text",
+        "tags",
+        "created_at",
+        "expires_at",
+        "hit_count",
+        "supersedes"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "layer": {"$ref": "#/$defs/Layer"},
+        "namespace": {"type": "string"},
+        "status": {"$ref": "#/$defs/Status"},
+        "text": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "kind": {"type": "string", "enum": ["fact", "preference", "lesson"]},
+        "confidence": {"type": "number"},
+        "source": {"type": "string", "enum": ["user", "evolve", "import"]},
+        "session_id": {"type": "string", "description": "Pointer only; empty for global/staging."},
+        "created_at": {"type": "integer"},
+        "expires_at": {"type": ["integer", "null"]},
+        "hit_count": {"type": "integer"},
+        "supersedes": {"type": ["string", "null"]},
+        "superseded_by": {"type": ["string", "null"]},
+        "evidence": {"type": ["object", "null"], "description": "Lesson evidence pointer; never a transcript."},
+        "verified_at": {"type": ["integer", "null"]},
+        "promoted_by": {"type": ["string", "null"]}
+      }
+    },
+    "ChainItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "created_at"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "status": {"$ref": "#/$defs/Status"},
+        "created_at": {"type": "integer"}
+      }
+    },
+    "MemoryQuery": {
+      "type": "object",
+      "description": "Filters for memory/admin_list. `q` is a SQLite LIKE over text and tags, never a vector search.",
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"$ref": "#/$defs/Layer"},
+        "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:_-]{0,63}$"},
+        "status": {"$ref": "#/$defs/Status"},
+        "from": {"type": "integer", "description": "created_at >= from (unix seconds)"},
+        "to": {"type": "integer", "description": "created_at <= to (unix seconds)"},
+        "q": {"type": "string", "maxLength": 256},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+        "cursor": {"type": "string", "description": "Opaque next_cursor from the previous page."}
+      }
+    },
+    "ReadSessionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/Ulid", "description": "Core-injected; never model-supplied."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+      }
+    },
+    "ReadSessionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "tags", "created_at"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "text": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "created_at": {"type": "integer"}
+      }
+    },
+    "ReadSessionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "#/$defs/ReadSessionItem"}}
+      }
+    },
+    "AdminListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor"],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "#/$defs/MemoryItem"}},
+        "next_cursor": {"type": ["string", "null"]}
+      }
+    },
+    "AdminGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {"id": {"$ref": "#/$defs/Ulid"}}
+    },
+    "AdminGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item", "chain"],
+      "properties": {
+        "item": {"$ref": "#/$defs/MemoryItem"},
+        "chain": {"type": "array", "items": {"$ref": "#/$defs/ChainItem"}}
+      }
+    },
+    "AdminPromoteRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "by"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "by": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Admin name; module writes promoted_by=admin:<name>."}
+      }
+    },
+    "AdminPromoteResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "id"],
+      "properties": {"ok": {"const": true}, "id": {"$ref": "#/$defs/Ulid"}}
+    },
+    "AdminArchiveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "reason", "by"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 200},
+        "by": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "AdminRestoreRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "by"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Ulid"},
+        "by": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "OkResponse": {"type": "object", "additionalProperties": false, "required": ["ok"], "properties": {"ok": {"const": true}}},
+    "AdminStatsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["global_count", "global_limit", "staging_count", "archived_count", "oldest_at"],
+      "properties": {
+        "global_count": {"type": "integer", "minimum": 0},
+        "global_limit": {"type": "integer", "minimum": 1},
+        "staging_count": {"type": "integer", "minimum": 0},
+        "archived_count": {"type": "integer", "minimum": 0},
+        "oldest_at": {"type": ["integer", "null"]}
+      }
+    }
+  },
+  "methods": {
+    "memory/read_session": {
+      "request": {"$ref": "#/$defs/ReadSessionRequest"},
+      "response": {"$ref": "#/$defs/ReadSessionResponse"},
+      "private": true
+    },
+    "memory/admin_list": {
+      "request": {"$ref": "#/$defs/MemoryQuery"},
+      "response": {"$ref": "#/$defs/AdminListResponse"},
+      "private": true
+    },
+    "memory/admin_get": {
+      "request": {"$ref": "#/$defs/AdminGetRequest"},
+      "response": {"$ref": "#/$defs/AdminGetResponse"},
+      "private": true
+    },
+    "memory/admin_promote": {
+      "request": {"$ref": "#/$defs/AdminPromoteRequest"},
+      "response": {"$ref": "#/$defs/AdminPromoteResponse"},
+      "private": true
+    },
+    "memory/admin_archive": {
+      "request": {"$ref": "#/$defs/AdminArchiveRequest"},
+      "response": {"$ref": "#/$defs/OkResponse"},
+      "private": true
+    },
+    "memory/admin_restore": {
+      "request": {"$ref": "#/$defs/AdminRestoreRequest"},
+      "response": {"$ref": "#/$defs/OkResponse"},
+      "private": true
+    },
+    "memory/admin_stats": {
+      "request": {"type": "object", "additionalProperties": false},
+      "response": {"$ref": "#/$defs/AdminStatsResponse"},
+      "private": true
+    }
+  }
+}
