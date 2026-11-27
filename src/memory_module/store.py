@@ -1266,7 +1266,11 @@ class SqliteBackend:
                 if existing is not None:
                     self._revive_locked(rec, _pack_vector(staging.embedding))
                 else:
-                    self._insert_locked(rec)
+                    # Pass the vector explicitly: `_insert_locked`'s default is a
+                    # zero vector, which `VectorIndex.add` rejects on the next
+                    # startup ("embedding vector has zero norm"). A promoted row
+                    # without its embedding would poison the whole index.
+                    self._insert_locked(rec, _pack_vector(staging.embedding))
                 self._conn.execute("DELETE FROM staging WHERE id=?", (staging_id,))
             for old in removed:
                 self._forget_from_memory(old.id)

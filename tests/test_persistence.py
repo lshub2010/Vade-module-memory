@@ -36,6 +36,33 @@ def settings_for(tmp_path, **overrides):
     return MemorySettings(**kwargs)
 
 
+def test_promoted_staging_row_keeps_its_vector_across_restart(tmp_path):
+    """A promotion must store the real embedding, not `_insert_locked`'s zero default.
+
+    Regression: `staging_promote` used to call `_insert_locked(rec)` without the
+    blob, so the global row carried an all-zero vector. The next startup then
+    failed in `VectorIndex.add` with "embedding vector has zero norm", i.e. one
+    promotion bricked the whole module.
+    """
+    settings = settings_for(tmp_path)
+    backend = SqliteBackend(settings)
+    session_id = new_ulid()
+    vector = [0.0, 1.0] + [0.0] * (settings.embedding_dim - 2)
+    staging_id = backend.staging_put("晋升后必须仍可检索", "user:default", session_id, vector, 0.8)
+    promoted = backend.staging_promote(staging_id)
+    backend.close()
+
+    reopened = SqliteBackend(settings)
+    try:
+        stored = reopened.get(promoted)
+        assert stored is not None
+        assert stored.embedding is None or len(stored.embedding) == settings.embedding_dim
+        hits = reopened.search(vector, k=3, namespace="user:default")
+        assert [row.id for row in hits] == [promoted]
+    finally:
+        reopened.close()
+
+
 def test_restart_returns_the_same_order_and_scores(tmp_path):
     settings = settings_for(tmp_path)
     first = MemoryService(settings, embedder=FakeEmbedding(dim=8), clock=Clock())
