@@ -114,11 +114,14 @@ def test_session_closed_expires_seven_days_after_close(tmp_path):
         "remember", {"text": "关闭后仍然保留", "scope": "session"}, session_id=session_id
     )
     clock.now += 10 * 86400  # ten days later, the session is closed
-    result = service.handle_event("session.closed", {"session_id": session_id})
+    closed_at_ms = (clock.now - 3600) * 1000  # core's event timestamp: one hour before handling
+    result = service.handle_event(
+        "session.closed", {"session_id": session_id, "closed_at": closed_at_ms}
+    )
     assert result["updated"] == 1
     stored = service.backend.get(rec["id"])
     assert stored is not None
-    assert stored.expires_at == clock.now + 7 * 86400
+    assert stored.expires_at == (clock.now - 3600) + 7 * 86400
     service.close()
 
 
@@ -251,6 +254,21 @@ def test_deleted_rows_are_purged_after_seven_days_but_archive_survives(tmp_path)
     assert conn.execute("SELECT COUNT(*) FROM archive WHERE id=?", (rec["id"],)).fetchone()[0] == 1
     conn.close()
     reopened.close()
+
+
+def test_remember_after_forget_revives_without_physical_delete(tmp_path):
+    service = MemoryService(settings_for(tmp_path), embedder=FakeEmbedding(dim=8), clock=Clock())
+    first = service.call_tool("remember", {"text": "忘掉再记一次"})
+    service.call_tool("forget", {"id": first["id"]})
+    second = service.call_tool("remember", {"text": "忘掉再记一次"})
+    assert second["deduped"] is False
+    assert service.backend.count() == 1
+    assert service.call_tool("recall", {"query": "忘掉再记", "k": 5})["count"] == 1
+    conn = sqlite3.connect(service.settings.db_path)
+    assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM archive WHERE id=?", (first["id"],)).fetchone()[0] == 1
+    conn.close()
+    service.close()
 
 
 def test_embedding_failure_leaves_no_row(tmp_path):

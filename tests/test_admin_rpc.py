@@ -132,6 +132,8 @@ def test_staging_lesson_requires_evidence(tmp_path):
     item, _ = service.backend.admin_list(status="staging", limit=10)
     assert [row.id for row in item] == [staging_id]
     assert item[0].layer == "staging"
+    detail, chain = service.backend.admin_get(staging_id)
+    assert detail.id == staging_id and detail.status == "staging" and chain == []
     service.close()
 
 
@@ -218,8 +220,10 @@ def test_events_and_consolidate_watermark(tmp_path):
     first = service.backend.record_consolidate("scheduled", {"promoted": 2, "merged": 1})
     second = service.backend.record_consolidate("manual", {"promoted": 0})
     assert second == first + 1
+    explicit = service.backend.record_consolidate(99, "manual", {"promoted": 3})
+    assert explicit == 99
     last = service.backend.get_last_consolidate()
     assert last is not None
     assert last["kind"] == "manual"
-    assert last["stats"] == {"promoted": 0}
+    assert last["stats"] == {"promoted": 3}
     service.close()

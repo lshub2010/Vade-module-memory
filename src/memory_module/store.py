@@ -203,7 +203,7 @@ class ArchiveRecord:
 class MemoryBackend(Protocol):
     """The only surface `tools.py` / `evolve/` may use."""
 
-    def put(self, rec: MemoryRecord) -> str: ...
+    def put(self, rec: MemoryRecord, vec: Sequence[float] | None = None) -> str: ...
     def put_with_vector(self, rec: MemoryRecord, vec: Sequence[float]) -> str: ...
     def find_by_hash(
         self, layer: str, session_id: str, namespace: str, digest: str
@@ -665,18 +665,19 @@ class SqliteBackend:
             raise MemoryFailure("INVALID_ARGUMENT", "id must be a ULID")
         return rec
 
-    def put(self, rec: MemoryRecord) -> str:
-        """Store a record; `rec.embedding` is the vector, computed by the caller.
+    def put(self, rec: MemoryRecord, vec: Sequence[float] | None = None) -> str:
+        """Store a record; the vector comes from `vec` or `rec.embedding`.
 
-        The vector is not a separate argument because the frozen `MemoryRecord`
-        contract (C-12) carries it as a transient field. Keeping embedding out
-        of `to_dict()` is deliberate: archive payloads must not grow a second
-        copy of a 1536-float BLOB.
+        The vector is not a separate column in C-12; `MemoryRecord.embedding`
+        is a transient input. `vec` is accepted as a convenience for callers
+        that keep the vector outside the record.
         """
+        if vec is not None:
+            return self.put_with_vector(rec, vec)
         if rec.embedding is None:
             raise MemoryFailure(
                 "INVALID_ARGUMENT",
-                "put() requires rec.embedding; a memory row cannot exist without its vector",
+                "put() requires rec.embedding (or the vec argument); a memory row cannot exist without its vector",
             )
         return self.put_with_vector(rec, rec.embedding)
 
@@ -711,21 +712,63 @@ class SqliteBackend:
                 if existing is not None:
                     if existing in self._records:
                         return existing
-                    # A forgotten row keeps its UNIQUE key until the 7-day
-                    # purge. Re-remembering the same text before then must not
-                    # return the tombstone, so drop the dead row first (the
-                    # archive payload already preserves the audit copy).
-                    self._conn.execute("DELETE FROM memories WHERE id=? AND deleted_at IS NOT NULL", (existing,))
-                if rec.layer == "global":
-                    removed = self._ensure_global_space_locked()
+                    # Re-remembering content that was soft-deleted before its
+                    # 7-day purge must not issue a physical DELETE (M4a §七).
+                    # Revive the archived row and keep its archive audit copy.
+                    rec.id = existing
+                    if rec.layer == "global":
+                        removed = self._ensure_global_space_locked()
+                    else:
+                        self._ensure_session_space_locked(rec)
+                    self._revive_locked(rec, blob)
                 else:
-                    self._ensure_session_space_locked(rec)
-                self._insert_locked(rec, blob)
+                    if rec.layer == "global":
+                        removed = self._ensure_global_space_locked()
+                    else:
+                        self._ensure_session_space_locked(rec)
+                    self._insert_locked(rec, blob)
             for old in removed:
                 self._forget_from_memory(old.id)
+            # The vector lives in the index as a compact float32 array. Keeping
+            # the caller's Python list on the record too would double the
+            # 20k x 1536 memory cost for no benefit.
+            rec.embedding = None
             self._records[rec.id] = rec
             self._index.add(rec.id, vector)
             return rec.id
+
+    def _revive_locked(self, rec: MemoryRecord, blob: bytes) -> None:
+        """Clear `deleted_at` and overwrite a tombstone in place (no DELETE)."""
+        self._conn.execute(
+            """
+            UPDATE memories SET
+              text=?, tags=?, content_hash=?, embedding=?, importance=?,
+              confidence=?, source=?, kind=?, evidence=?, verified_at=?,
+              supersedes=?, superseded_by=?, hit_count=?, last_hit_at=?,
+              created_at=?, expires_at=?, deleted_at=NULL, promoted_by=?
+            WHERE id=?
+            """,
+            (
+                rec.text,
+                json.dumps(list(rec.tags), ensure_ascii=False),
+                rec.content_hash,
+                blob,
+                float(rec.importance),
+                float(rec.confidence),
+                rec.source,
+                rec.kind,
+                None if rec.evidence is None else json.dumps(rec.evidence, ensure_ascii=False),
+                rec.verified_at,
+                rec.supersedes,
+                rec.superseded_by,
+                int(rec.hit_count),
+                rec.last_hit_at,
+                int(rec.created_at),
+                rec.expires_at,
+                rec.promoted_by,
+                rec.id,
+            ),
+        )
 
     def _insert_locked(self, rec: MemoryRecord, blob: bytes | None = None) -> None:
         if blob is None:
@@ -987,34 +1030,17 @@ class SqliteBackend:
         )
         params.extend([int(limit) + 1, offset])
         rows = self._conn.execute(sql, tuple(params)).fetchall()
-        out: list[MemoryRecord] = []
-        for row in rows:
-            staging = _row_to_staging(row)
-            out.append(
-                MemoryRecord(
-                    id=staging.id,
-                    layer="staging",
-                    namespace=staging.namespace,
-                    session_id="",
-                    text=staging.text,
-                    tags=[],
-                    content_hash=staging.content_hash,
-                    importance=0.0,
-                    confidence=staging.confidence,
-                    source="evolve",
-                    kind=staging.kind,
-                    evidence=staging.evidence,
-                    created_at=staging.created_at,
-                    status="staging",
-                )
-            )
-        return out
+        return [_staging_to_record(_row_to_staging(row)) for row in rows]
 
     def admin_get(self, mem_id: str) -> tuple[MemoryRecord, list[MemoryRecord]]:
         with self._lock:
             row = self._fetch_row(mem_id)
             if row is None:
-                raise MemoryFailure("NOT_FOUND", f"memory {mem_id!r} does not exist")
+                srow = self._conn.execute("SELECT * FROM staging WHERE id=?", (mem_id,)).fetchone()
+                if srow is None:
+                    raise MemoryFailure("NOT_FOUND", f"memory {mem_id!r} does not exist")
+                # The admin list shows staging rows; clicking one must work too.
+                return _staging_to_record(_row_to_staging(srow)), []
             current = _row_to_record(row)
             current.status = derive_status(current)
             chain: list[MemoryRecord] = []
@@ -1135,11 +1161,11 @@ class SqliteBackend:
             raise MemoryFailure("INVALID_ARGUMENT", "evidence must be an object")
         if not (0.0 <= float(confidence) <= 1.0):
             raise MemoryFailure("INVALID_ARGUMENT", "confidence must be within [0, 1]")
-        if embedding is not None and len(embedding) != self.dim:
-            raise MemoryFailure(
-                "INVALID_ARGUMENT",
-                f"embedding has dimension {len(embedding)} but memory.embedding_dim is {self.dim}",
-            )
+        if embedding is not None:
+            try:
+                embedding = check_vector(embedding, self.dim, where="staging embedding")
+            except EmbeddingError as exc:
+                raise MemoryFailure("INVALID_ARGUMENT", exc.message) from None
         if session_id and not ULID_RE.match(session_id):
             raise MemoryFailure("INVALID_ARGUMENT", "session_id must be a ULID")
         digest = content_hash("staging", "", namespace, text)
@@ -1232,15 +1258,19 @@ class SqliteBackend:
                 with self._tx():
                     self._conn.execute("DELETE FROM staging WHERE id=?", (staging_id,))
                 return existing
+            if existing is not None:
+                rec.id = existing
             removed: list[MemoryRecord] = []
             with self._tx():
-                if existing is not None:
-                    self._conn.execute("DELETE FROM memories WHERE id=? AND deleted_at IS NOT NULL", (existing,))
                 removed = self._ensure_global_space_locked()
-                self._insert_locked(rec)
+                if existing is not None:
+                    self._revive_locked(rec, _pack_vector(staging.embedding))
+                else:
+                    self._insert_locked(rec)
                 self._conn.execute("DELETE FROM staging WHERE id=?", (staging_id,))
             for old in removed:
                 self._forget_from_memory(old.id)
+            rec.embedding = None
             self._records[rec.id] = rec
             self._index.add(rec.id, staging.embedding)
             return rec.id
@@ -1373,8 +1403,24 @@ class SqliteBackend:
         }
 
     def record_consolidate(
-        self, kind: str, stats: Mapping[str, Any] | None = None, *, last_run: int | None = None
+        self,
+        kind: Any,
+        stats: Any = None,
+        stats2: Any = None,
+        *,
+        last_run: int | None = None,
+        run_id: int | None = None,
     ) -> int:
+        """Record a consolidate run.
+
+        Accepts both shapes the task book mentions:
+        `record_consolidate(kind, stats)` (run_id autoincrement) and
+        `record_consolidate(run_id, kind, stats)` (M4b passing its own run id).
+        """
+        if isinstance(kind, int) and not isinstance(kind, bool) and isinstance(stats, str):
+            run_id = kind
+            kind = stats
+            stats = stats2
         if kind not in ("scheduled", "startup_backfill", "manual"):
             raise MemoryFailure(
                 "INVALID_ARGUMENT",
@@ -1383,10 +1429,21 @@ class SqliteBackend:
         payload = json.dumps(dict(stats or {}), ensure_ascii=False)
         with self._lock:
             with self._tx():
-                cursor = self._conn.execute(
-                    "INSERT INTO consolidate_run(last_run,kind,stats) VALUES(?,?,?)",
-                    (int(self._clock()) if last_run is None else int(last_run), kind, payload),
-                )
+                if run_id is None:
+                    cursor = self._conn.execute(
+                        "INSERT INTO consolidate_run(last_run,kind,stats) VALUES(?,?,?)",
+                        (int(self._clock()) if last_run is None else int(last_run), kind, payload),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        "INSERT INTO consolidate_run(run_id,last_run,kind,stats) VALUES(?,?,?,?)",
+                        (
+                            int(run_id),
+                            int(self._clock()) if last_run is None else int(last_run),
+                            kind,
+                            payload,
+                        ),
+                    )
                 return int(cursor.lastrowid)
 
     # ------------------------------------------------------------------ debug
@@ -1401,6 +1458,8 @@ class SqliteBackend:
             ids = self._index.ids()
             vectors = self._index.vectors()
             if _np is not None:
+                if not vectors:
+                    return ids, _np.zeros((0, self.dim), dtype=_np.float32)
                 return ids, _np.asarray(vectors, dtype=_np.float32)
             return ids, vectors
 
@@ -1456,6 +1515,26 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         expires_at=None if row["expires_at"] is None else int(row["expires_at"]),
         deleted_at=None if row["deleted_at"] is None else int(row["deleted_at"]),
         promoted_by=None if "promoted_by" not in row.keys() or row["promoted_by"] is None else str(row["promoted_by"]),
+    )
+
+
+def _staging_to_record(staging: StagingRecord) -> MemoryRecord:
+    """Synthetic MemoryRecord for the admin surface (layer='staging')."""
+    return MemoryRecord(
+        id=staging.id,
+        layer="staging",
+        namespace=staging.namespace,
+        session_id="",
+        text=staging.text,
+        tags=[],
+        content_hash=staging.content_hash,
+        importance=0.0,
+        confidence=staging.confidence,
+        source="evolve",
+        kind=staging.kind,
+        evidence=staging.evidence,
+        created_at=staging.created_at,
+        status="staging",
     )
 
 

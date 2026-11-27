@@ -110,6 +110,17 @@ class MemoryService:
         if function is None:
             raise MemoryFailure("NOT_FOUND", f"unknown tool {name!r}")
         payload = dict(args or {})
+        required = {
+            "remember": ["text"],
+            "recall": ["query"],
+            "forget": ["id"],
+        }[name]
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise MemoryFailure(
+                "INVALID_ARGUMENT",
+                f"missing required argument(s) {missing} for tool {name!r}",
+            )
         allowed = {
             "remember": {"text", "tags", "scope", "namespace"},
             "recall": {"query", "k", "namespace", "include_session", "include_superseded"},
@@ -210,7 +221,23 @@ def _build_module_app(service: MemoryService) -> Any:
     return app
 
 
-def build_app(service: MemoryService | None = None) -> Any:
+class _SchemaOnlyService:
+    """A service-shaped object for `--print-manifest` / `--check`.
+
+    Manifest generation must not open SQLite: a dimension mismatch or a
+    read-only data directory must not stop the module from describing itself,
+    and `--check` is run in CI before any database exists.
+    """
+
+    def __init__(self, settings: MemorySettings) -> None:
+        self.settings = settings
+        self.tools = tools_module.MemoryTools(None, LocalHashEmbedding(settings.embedding_dim), settings)
+
+    def close(self) -> None:
+        return None
+
+
+def build_app(service: MemoryService | _SchemaOnlyService | None = None) -> Any:
     """Build the `ModuleApp`. The SDK is imported here, not at module import."""
     return _build_module_app(service or build_service())
 
@@ -302,6 +329,58 @@ def _run_event_cli(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_standalone_cli(argv: Sequence[str]) -> int:
+    """`--standalone TOOL --args JSON` without the SDK.
+
+    The SDK's own standalone runner needs `vade_sdk`; this path builds the
+    service directly, which is what makes the image's "no SDK mounted" mode
+    (and the design's "tools.py works before the SDK exists" gate) real.
+    """
+    index = list(argv).index("--standalone")
+    if index + 1 >= len(argv):
+        sys.stderr.write("INVALID_ARGUMENT: --standalone needs a tool name\n")
+        return 2
+    name = argv[index + 1]
+    args_json = "{}"
+    if "--args" in argv:
+        at = list(argv).index("--args")
+        if at + 1 >= len(argv):
+            sys.stderr.write("INVALID_ARGUMENT: --args needs a JSON object\n")
+            return 2
+        args_json = argv[at + 1]
+    try:
+        payload = json.loads(args_json or "{}")
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"INVALID_ARGUMENT: --args is not valid JSON: {exc}\n")
+        return 2
+    if not isinstance(payload, dict):
+        sys.stderr.write("INVALID_ARGUMENT: --args must be a JSON object\n")
+        return 2
+    service = build_service()
+    try:
+        result = service.call_tool(name, payload)
+    except MemoryFailure as exc:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": exc.code,
+                        "message": exc.message[:300],
+                        "retriable": exc.code in ("MEMORY_FULL", "UNAVAILABLE", "OVERLOADED", "TIMEOUT"),
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        return 1
+    finally:
+        service.close()
+    sys.stdout.write(json.dumps({"ok": True, "result": result}, ensure_ascii=False) + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     from .errors import StartupError
@@ -315,6 +394,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_rpc_cli(args)
         if "--event" in args:
             return _run_event_cli(args)
+        if "--print-manifest" in args or "--check" in args:
+            return build_app(_SchemaOnlyService(MemorySettings.from_env())).run(args)
+        if "--standalone" in args and "--core" not in args:
+            return _run_standalone_cli(args)
         return build_app().run(args)
     except StartupError as exc:
         # A dimension/model mismatch must be one readable line, not a traceback

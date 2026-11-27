@@ -110,12 +110,15 @@ class MemorySettings:
         """The name persisted in `meta.embedding_model`.
 
         An empty `memory.embedding_model` means the built-in local model, per
-        C-18. Persisting the effective name (not the empty string) is what lets
-        a later `MEMORY_EMBEDDING_MODEL` change fail loudly instead of silently
-        re-embedding the whole database.
+        C-18. If an OpenAI-compatible base URL is configured but no model name
+        is given, the provider's usual small embedding model is the sane
+        default; persisting the effective name is what lets a later model
+        change fail loudly instead of silently re-embedding the database.
         """
         model = self.embedding_model.strip()
-        return model or "local-hash-v1"
+        if model:
+            return model
+        return "text-embedding-3-small" if self.embedding_base_url else "local-hash-v1"
 
     @property
     def effective_session_write_char_limit(self) -> int:

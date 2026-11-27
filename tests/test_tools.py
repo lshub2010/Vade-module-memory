@@ -186,6 +186,15 @@ def test_session_id_is_not_a_tool_argument(tmp_path):
     assert service.backend.count() == 0
 
 
+def test_missing_required_tool_argument_is_structured(tmp_path):
+    service, _, _ = make_service(tmp_path)
+    for name in ("remember", "recall", "forget"):
+        with pytest.raises(MemoryFailure) as exc:
+            service.call_tool(name, {})
+        assert exc.value.code == "INVALID_ARGUMENT"
+    service.close()
+
+
 @pytest.mark.parametrize(
     "args, code",
     [

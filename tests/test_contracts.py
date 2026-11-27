@@ -61,6 +61,29 @@ def test_c16_declares_all_seven_private_methods_and_no_tool_table():
     assert query["limit"]["default"] == 50 and query["limit"]["maximum"] == 200
 
 
+def test_c12_validates_a_session_record_with_empty_namespace():
+    import jsonschema
+
+    from memory_module.store import MemoryRecord, new_ulid
+
+    schema = load("memory.schema.json")
+    record = MemoryRecord(
+        id=new_ulid(),
+        layer="session",
+        namespace="",
+        session_id=new_ulid(),
+        text="会话条目",
+        tags=[],
+        content_hash="0" * 64,
+        importance=5.0,
+        confidence=1.0,
+        source="user",
+        kind="fact",
+        created_at=1_700_000_000,
+    )
+    jsonschema.Draft202012Validator(schema).validate({"memory": record.to_dict()})
+
+
 def test_manifest_is_valid_json_and_has_no_secret_literals():
     manifest = json.loads((MODULE_ROOT / "manifest.json").read_text(encoding="utf-8"))
     blob = json.dumps(manifest)

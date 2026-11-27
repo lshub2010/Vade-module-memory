@@ -245,7 +245,12 @@ def handle_event(backend: MemoryBackend, topic: str, payload: Any = None) -> dic
             session_id = data["session"].get("id")
         if not isinstance(session_id, str) or not ULID_RE.match(session_id):
             raise MemoryFailure("INVALID_ARGUMENT", "session.closed payload has no valid session_id")
-        changed = backend.close_session(session_id)  # 7 days from close, not from now
+        closed_at = data.get("closed_at")
+        closed_at_s: int | None = None
+        if isinstance(closed_at, int) and not isinstance(closed_at, bool) and closed_at > 0:
+            # C-14 carries unix milliseconds; `close_session` takes seconds.
+            closed_at_s = closed_at // 1000 if closed_at > 10_000_000_000 else closed_at
+        changed = backend.close_session(session_id, now=closed_at_s)  # 7 days from close, not from now
         return {"ok": True, "handled": True, "session_id": session_id, "updated": changed}
     if topic == "session.turn":
         return {"ok": True, "handled": False}
