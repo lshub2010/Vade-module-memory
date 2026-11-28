@@ -224,7 +224,7 @@ class RpcDispatcher:
 
     def _memory_admin_archive(self, params: dict[str, Any]) -> dict[str, Any]:
         mem_id = _require_id(params.get("id"))
-        reason = _require_id(params.get("reason"), "reason")[:200]
+        reason = _require_id(params.get("reason"), "reason")[:300]
         by = _require_id(params.get("by"), "by")[:64]
         if not self.backend.admin_archive(mem_id, reason, by):
             raise MemoryFailure("NOT_FOUND", f"memory {mem_id!r} does not exist or is already archived")
