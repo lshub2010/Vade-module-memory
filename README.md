@@ -209,7 +209,7 @@ embedder 的既有先例（`MEMORY_EMBEDDING_BASE_URL` 同样不在 `[memory]` s
 | `MEMORY_EVOLVE_ENABLED` | `0` | 总开关；false ⇒ 不订阅、不写入、不调模型 |
 | `MEMORY_EVOLVE_LLM_BASE_URL` | 空 | OpenAI 兼容地址，写到 `/v1` 这一级。空 ⇒ 纯规则 |
 | `MEMORY_EVOLVE_LLM_API_KEY_ENV` | `MEMORY_API_KEY` | **变量名**，不是密钥本身；每次调用重读 |
-| `MEMORY_EVOLVE_LLM_MODEL` | 空 | provider 的模型 id；空则退回 `evolve.model`（`"cheap"` 标签） |
+| `MEMORY_EVOLVE_LLM_MODEL` | 空 | provider 的模型 id；空则退回 `evolve.model`（`"cheap"` 标签），**并打警告** |
 | `MEMORY_EVOLVE_LLM_TIMEOUT_S` | `30` | 单次请求 socket 超时（0.1–120） |
 
 只配 `MEMORY_EVOLVE_ENABLED=1` 而不配 `MEMORY_EVOLVE_LLM_BASE_URL` 时，模块正常启动、
