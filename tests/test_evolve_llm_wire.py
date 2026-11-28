@@ -275,6 +275,37 @@ def test_enabled_without_base_url_warns_once_and_degrades(tmp_path, caplog):
     assert any("evolve_degraded" in r.message for r in caplog.records)
 
 
+def test_missing_model_id_warns_about_the_cost_label(tmp_path, caplog):
+    """Falling back to `evolve.model` ("cheap") sends a non-id upstream: warn."""
+    from memory_module.server import build_evolve_llm
+
+    settings = MemorySettings(data_dir=tmp_path, evolve_llm_base_url="http://127.0.0.1:1/v1")
+    with caplog.at_level(logging.WARNING, logger="memory_module"):
+        client = build_evolve_llm(settings, EvolveSettings(enabled=True))
+
+    assert client is not None, "a configured base_url must still build a client"
+    assert client.model == "cheap", "the documented fallback is the cost label"
+    warned = [r.message for r in caplog.records if "MEMORY_EVOLVE_LLM_MODEL is unset" in r.message]
+    assert len(warned) == 1, "one explicit warning, not silent degradation"
+    assert "cheap" in warned[0]
+
+
+def test_an_explicit_model_id_suppresses_that_warning(tmp_path, caplog):
+    """Setting a real model id is the supported path and must be quiet."""
+    from memory_module.server import build_evolve_llm
+
+    settings = MemorySettings(
+        data_dir=tmp_path,
+        evolve_llm_base_url="http://127.0.0.1:1/v1",
+        evolve_llm_model="real-model-id",
+    )
+    with caplog.at_level(logging.WARNING, logger="memory_module"):
+        client = build_evolve_llm(settings, EvolveSettings(enabled=True))
+
+    assert client is not None and client.model == "real-model-id"
+    assert not [r for r in caplog.records if "MEMORY_EVOLVE_LLM_MODEL is unset" in r.message]
+
+
 def test_disabled_evolve_builds_no_client_even_with_a_base_url(tmp_path, caplog):
     """`enabled=false` is silent and inert even when a URL is configured."""
     from memory_module.server import build_evolve_llm

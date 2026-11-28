@@ -141,6 +141,18 @@ def build_evolve_llm(
         client.model,
         client.api_key_env,
     )
+    if not (settings.evolve_llm_model or "").strip():
+        # `evolve.model` is a cost label, not a provider id. Falling back to it
+        # sends `model: "cheap"` upstream, which most providers answer with 400
+        # — and that surfaces as `evolve_degraded` on every trigger instead of
+        # a startup error, so it is easy to miss. One warning here beats
+        # debugging silent degradation later.
+        log.warning(
+            "MEMORY_EVOLVE_LLM_MODEL is unset: requests will carry the cost label "
+            "%r as the model id, which most providers reject (HTTP 400). "
+            "Set MEMORY_EVOLVE_LLM_MODEL to a real model id.",
+            client.model,
+        )
     return client
 
 
