@@ -21,6 +21,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import logging
 import sys
 from typing import Any, Callable, Mapping, Sequence
 
@@ -28,6 +29,7 @@ from . import tools as tools_module
 from .embed import EmbeddingClient, LocalHashEmbedding, OpenAIEmbeddingClient
 from .errors import MemoryFailure
 from .evolve.config import EvolveSettings
+from .evolve.openai_compat import OpenAICompatLLM
 from .evolve.pipeline import EvolvePipeline
 from .evolve.skillgen import SkillGenerator
 from .evolve.worker import EvolveWorker
@@ -40,6 +42,8 @@ __all__ = [
     "MODULE_VERSION",
     "MemoryService",
     "build_service",
+    "build_embedder",
+    "build_evolve_llm",
     "build_app",
     "handle_rpc",
     "handle_event",
@@ -50,6 +54,8 @@ __all__ = [
 MODULE_ID = "com.example.memory"
 MODULE_VERSION = "1.0.0"
 SUBSCRIPTIONS = ("session.turn", "session.closed")
+
+_log = logging.getLogger("memory_module")
 
 TOOL_METADATA: dict[str, dict[str, Any]] = {
     "remember": {
@@ -83,6 +89,59 @@ def build_embedder(settings: MemorySettings) -> EmbeddingClient:
             timeout_s=settings.embedding_timeout_s,
         )
     return LocalHashEmbedding(dim=settings.embedding_dim, model=settings.effective_model)
+
+
+def build_evolve_llm(
+    settings: MemorySettings,
+    evolve: EvolveSettings | None = None,
+    *,
+    logger: Any = None,
+) -> Any:
+    """The real model callable, or `None` when no upstream is configured.
+
+    Mirrors `build_embedder`: configured ⇒ real client, not configured ⇒ the
+    offline path. `None` here is not an error — `EvolveLLM` already handles it
+    by logging `evolve_degraded reason=no_llm` and running pure rules, which is
+    exactly today's behaviour for every deployment that has not opted in.
+
+    When evolve is *enabled* but has no upstream, that is almost always a
+    half-finished setup rather than a choice, so it gets one explicit warning
+    instead of degrading silently.
+    """
+    log = logger or _log
+    enabled = bool(evolve is not None and evolve.enabled)
+    base_url = (settings.evolve_llm_base_url or "").strip()
+    if not enabled:
+        # `enabled=false` must stay byte-for-byte silent about model config:
+        # no client, no warning, no log noise for the M4a-only deployment.
+        return None
+    if not base_url:
+        log.warning(
+            "evolve enabled but MEMORY_EVOLVE_LLM_BASE_URL is unset: "
+            "turn_review/session_close/consolidate/skill_evolve will run pure rules"
+        )
+        return None
+    label = str(getattr(evolve, "model", "") or "cheap")
+    try:
+        client = OpenAICompatLLM(
+            base_url=base_url,
+            model=settings.effective_evolve_model(label),
+            api_key_env=settings.evolve_llm_api_key_env,
+            timeout_s=settings.evolve_llm_timeout_s,
+            logger=log,
+        )
+    except ValueError as exc:
+        # A bad base_url must not stop the module from starting: the rule layer
+        # is still useful and a typo should not take the session path down.
+        log.warning("evolve llm disabled: %s", exc)
+        return None
+    log.info(
+        "evolve llm configured endpoint=%s/chat/completions model=%s key_env=%s",
+        client.base_url,
+        client.model,
+        client.api_key_env,
+    )
+    return client
 
 
 class MemoryService:
@@ -321,7 +380,15 @@ def build_app(service: MemoryService | _SchemaOnlyService | None = None) -> Any:
     if service is None:
         # `MEMORY_EVOLVE_ENABLED=1` is the only way evolve turns on; without it
         # the service is byte-for-byte M4a (no worker, no subscription).
-        service = build_service(evolve=EvolveSettings.from_env())
+        settings = MemorySettings.from_env()
+        evolve = EvolveSettings.from_env()
+        # `llm=None` unless `MEMORY_EVOLVE_LLM_BASE_URL` is set: the four model
+        # triggers then degrade to pure rules, which is the documented default.
+        service = build_service(
+            settings,
+            evolve=evolve,
+            llm=build_evolve_llm(settings, evolve),
+        )
     return _build_module_app(service)
 
 

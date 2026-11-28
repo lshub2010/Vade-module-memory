@@ -121,3 +121,74 @@ def test_with_overrides_keeps_validation():
     assert changed.nudge_interval == 20 and changed.enabled is True
     with pytest.raises(ValueError):
         settings.with_overrides(nudge_interval=1)
+
+
+# --------------------------------------------------- connection settings
+# These live on `MemorySettings`, not `EvolveSettings`: C-18's `[evolve]` table
+# has 14 keys and no upstream address, and core rejects unknown keys at startup.
+# Adding one here would make a valid config fail to boot.
+def test_evolve_settings_still_rejects_connection_keys():
+    for key in ("base_url", "api_key_env", "llm_base_url", "model_base_url"):
+        with pytest.raises(ValueError, match="unknown \\[evolve\\] key"):
+            EvolveSettings.from_mapping({key: "http://127.0.0.1:8080/v1"})
+
+
+def test_evolve_settings_key_set_matches_c18_exactly():
+    """Guards the contract: 14 keys, and none of them a connection setting."""
+    from memory_module.evolve.config import _KNOWN_KEYS
+
+    assert _KNOWN_KEYS == {
+        "enabled",
+        "allow_transcript",
+        "allowlist",
+        "nudge_interval",
+        "flush_min_turns",
+        "session_char_limit",
+        "summary_token_ratio",
+        "lesson_confidence_floor",
+        "failure_learning",
+        "daily_token_budget",
+        "daily_budget_skills",
+        "session_budget_skills",
+        "redact",
+        "model",
+    }
+    assert len(_KNOWN_KEYS) == 14
+
+
+def test_evolve_connection_env_vars_default_to_off():
+    """Unconfigured means off — the M4a-only deployment must not change."""
+    from memory_module.settings import MemorySettings
+
+    settings = MemorySettings.from_env({})
+    assert settings.evolve_llm_base_url == ""
+    assert settings.evolve_llm_api_key_env == "MEMORY_API_KEY"
+    assert settings.evolve_llm_timeout_s == 30.0
+    assert settings.evolve_llm_model == ""
+    # With no explicit model, the C-18 label is the documented fallback.
+    assert settings.effective_evolve_model() == "cheap"
+    assert settings.effective_evolve_model("custom-label") == "custom-label"
+
+
+def test_evolve_connection_env_vars_are_read_and_validated():
+    from memory_module.settings import MemorySettings
+
+    settings = MemorySettings.from_env(
+        {
+            "MEMORY_EVOLVE_LLM_BASE_URL": "https://router.example/v1",
+            "MEMORY_EVOLVE_LLM_API_KEY_ENV": "MY_EVOLVE_KEY",
+            "MEMORY_EVOLVE_LLM_TIMEOUT_S": "12.5",
+            "MEMORY_EVOLVE_LLM_MODEL": "gpt-4o-mini",
+        }
+    )
+    assert settings.evolve_llm_base_url == "https://router.example/v1"
+    assert settings.evolve_llm_api_key_env == "MY_EVOLVE_KEY"
+    assert settings.evolve_llm_timeout_s == 12.5
+    assert settings.effective_evolve_model() == "gpt-4o-mini"
+
+    with pytest.raises(ValueError, match="MEMORY_EVOLVE_LLM_BASE_URL"):
+        MemorySettings(evolve_llm_base_url="router.example/v1")
+    with pytest.raises(ValueError, match="evolve_llm_timeout_s"):
+        MemorySettings(evolve_llm_timeout_s=0)
+    with pytest.raises(ValueError):
+        MemorySettings.from_env({"MEMORY_EVOLVE_LLM_TIMEOUT_S": "999"})

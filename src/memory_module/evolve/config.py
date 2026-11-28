@@ -8,6 +8,14 @@ with the config page.
 
 `enabled` defaults to false. Nothing in `evolve/` writes, buffers or calls a
 model until it is true (M4b §九: "enabled=false → 不订阅、不消费、不产生任何写入").
+
+**No connection settings live here.** This class reads exactly the 14 C-18
+keys and rejects anything else, because core validates `[evolve]` against
+`schema/config.schema.json` and refuses to start on an unknown key. The model
+upstream is configured by module-private environment variables on
+`MemorySettings` (`evolve_llm_base_url` / `evolve_llm_api_key_env` /
+`evolve_llm_timeout_s` / `evolve_llm_model`), the same way `embedding_base_url`
+already works. See `evolve/openai_compat.py`.
 """
 
 from __future__ import annotations

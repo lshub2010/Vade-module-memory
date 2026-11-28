@@ -73,6 +73,22 @@ class MemorySettings:
     embedding_base_url: str = ""
     api_key_env: str = "MEMORY_API_KEY"
     embedding_timeout_s: float = 10.0
+    #: Evolve's own model connection (M4b §九 `model = "cheap" 走 M4a 的 LLM
+    #: 配置`). These follow `embedding_base_url` exactly: module-private
+    #: environment variables, not C-18 keys. `[evolve]` in
+    #: `schema/config.schema.json` has 14 keys and no upstream address, so a
+    #: new field there would be rejected by core as unknown.
+    #:
+    #: Empty `evolve_llm_base_url` means "no model": the four model triggers
+    #: degrade to pure rules exactly as they do today. The key is never stored,
+    #: only the *name* of the variable holding it.
+    evolve_llm_base_url: str = ""
+    evolve_llm_api_key_env: str = "MEMORY_API_KEY"
+    evolve_llm_timeout_s: float = 30.0
+    #: Provider model id sent as `model` in the chat request. Empty means
+    #: `EvolveSettings.model` (the `"cheap"` label) is used, which is only
+    #: correct against a router that understands it.
+    evolve_llm_model: str = ""
 
     def __post_init__(self) -> None:
         if not (1 <= self.global_capacity <= 100_000):
@@ -100,6 +116,15 @@ class MemorySettings:
             raise ValueError("api_key_env must be the NAME of an environment variable, not empty")
         if not (0.1 <= self.embedding_timeout_s <= 120):
             raise ValueError(f"embedding_timeout_s must be within [0.1, 120], got {self.embedding_timeout_s}")
+        if self.evolve_llm_base_url and not self.evolve_llm_base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                "MEMORY_EVOLVE_LLM_BASE_URL must start with http:// or https://, "
+                f"got {self.evolve_llm_base_url!r}"
+            )
+        if not self.evolve_llm_api_key_env:
+            raise ValueError("evolve_llm_api_key_env must be the NAME of an environment variable, not empty")
+        if not (0.1 <= self.evolve_llm_timeout_s <= 120):
+            raise ValueError(f"evolve_llm_timeout_s must be within [0.1, 120], got {self.evolve_llm_timeout_s}")
 
     @property
     def db_path(self) -> Path:
@@ -123,6 +148,17 @@ class MemorySettings:
     @property
     def effective_session_write_char_limit(self) -> int:
         return self.session_write_char_limit or self.session_inject_char_limit
+
+    def effective_evolve_model(self, label: str = "cheap") -> str:
+        """The `model` field sent to the chat provider.
+
+        `evolve.model` in C-18 is a cost *label* ("cheap"), not a provider id —
+        `skillgen.py` only copies it into `derived_from.model` for provenance.
+        A real request needs a real id, so `MEMORY_EVOLVE_LLM_MODEL` wins and
+        the label is the documented fallback for routers that map it.
+        """
+        model = self.evolve_llm_model.strip()
+        return model or label
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "MemorySettings":
@@ -150,6 +186,12 @@ class MemorySettings:
             embedding_base_url=(env.get("MEMORY_EMBEDDING_BASE_URL") or "").strip(),
             api_key_env=api_key_env,
             embedding_timeout_s=_env_float(env, "MEMORY_EMBEDDING_TIMEOUT_S", 10.0, 0.1, 120.0),
+            evolve_llm_base_url=(env.get("MEMORY_EVOLVE_LLM_BASE_URL") or "").strip(),
+            evolve_llm_api_key_env=(
+                env.get("MEMORY_EVOLVE_LLM_API_KEY_ENV") or "MEMORY_API_KEY"
+            ).strip(),
+            evolve_llm_timeout_s=_env_float(env, "MEMORY_EVOLVE_LLM_TIMEOUT_S", 30.0, 0.1, 120.0),
+            evolve_llm_model=(env.get("MEMORY_EVOLVE_LLM_MODEL") or "").strip(),
         )
 
     def with_overrides(self, **changes: object) -> "MemorySettings":
