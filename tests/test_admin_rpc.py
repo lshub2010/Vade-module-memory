@@ -308,3 +308,37 @@ def test_admin_list_accepts_float_unix_seconds(tmp_path):
     )
     assert page["items"], page
     service.close()
+
+
+def test_archive_reason_is_stored_in_full_at_the_contract_limit(tmp_path):
+    """The 300-char contract bound must reach storage, not stop at the RPC."""
+    service, _ = make_service(tmp_path)
+    rec = service.call_tool("remember", {"text": "长理由"})
+    reason = "理" * 300
+    assert service.handle_rpc(
+        "memory/admin_archive", {"id": rec["id"], "reason": reason, "by": "alice"}
+    ) == {"ok": True}
+    row = service.backend._conn.execute(
+        "SELECT reason FROM archive WHERE id=?", (rec["id"],)
+    ).fetchone()
+    assert len(row["reason"]) == 300
+
+    service.close()
+
+    service2, _ = make_service(tmp_path)
+    rec2 = service2.call_tool("remember", {"text": "超长理由"})
+    with pytest.raises(MemoryFailure) as exc:
+        service2.handle_rpc(
+            "memory/admin_archive", {"id": rec2["id"], "reason": "理" * 301, "by": "alice"}
+        )
+    assert exc.value.code == "INVALID_ARGUMENT"
+    service2.close()
+
+
+def test_admin_list_rejects_non_finite_time_filters(tmp_path):
+    service, _ = make_service(tmp_path)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(MemoryFailure) as exc:
+            service.handle_rpc("memory/admin_list", {"from": bad, "limit": 10})
+        assert exc.value.code == "INVALID_ARGUMENT", bad
+    service.close()

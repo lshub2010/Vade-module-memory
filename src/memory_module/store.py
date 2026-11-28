@@ -69,6 +69,9 @@ MAX_TEXT_CHARS = 8 * 1024
 MAX_TEXT_BYTES = 4 * MAX_TEXT_CHARS
 MAX_TAGS = 16
 MAX_TAG_CHARS = 32
+#: C-16 `reason` maxLength. Both the RPC layer and storage use this one bound;
+#: a shorter slice here silently dropped characters the admin had just typed.
+MAX_REASON_CHARS = 300
 #: C-12 `Evidence` required keys; a lesson without a locatable turn is not a
 #: lesson, it is an opinion.
 _EVIDENCE_KEYS = ("turn_id", "tool", "result_digest", "claim")
@@ -1103,7 +1106,7 @@ class SqliteBackend:
         with self._lock:
             now = int(self._clock())
             with self._tx():
-                rec = self._archive_sql_locked(mem_id, reason.strip()[:200], by.strip()[:64], now)
+                rec = self._archive_sql_locked(mem_id, reason.strip()[:MAX_REASON_CHARS], by.strip()[:64], now)
             if rec is None:
                 return False
             self._forget_from_memory(mem_id)
@@ -1351,7 +1354,7 @@ class SqliteBackend:
     def archive_row(self, mem_id: str, reason: str) -> None:
         if not isinstance(reason, str) or not reason.strip():
             raise MemoryFailure("INVALID_ARGUMENT", "reason must be a non-empty string")
-        if not self.delete_internal(mem_id, reason.strip()[:200]):
+        if not self.delete_internal(mem_id, reason.strip()[:MAX_REASON_CHARS]):
             raise MemoryFailure("NOT_FOUND", f"memory {mem_id!r} does not exist")
 
     def delete_internal(self, mem_id: str, reason: str) -> bool:
