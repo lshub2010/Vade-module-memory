@@ -197,6 +197,26 @@ M4a 已建好/提供（M4b 只调用，不改 `store.py`）：
 `evolve/` 空包已预置，manifest 也已声明 `role="evolve"`、
 `subscriptions=["session.turn","session.closed"]`、`injects=["session_id"]`。
 
+### M4b 的模型连接（模块私有环境变量，不改 C-18）
+
+四个模型触发器（`turn_review` / `session_close` / `consolidate` / `skill_evolve`）
+需要一个真实模型。连接信息**不进** `[evolve]` 表——C-18 的 `[evolve]` 共 14 个键，
+没有上游地址，往 `EvolveSettings` 加键会让 core 以「未知键」拒绝启动。这里照抄
+embedder 的既有先例（`MEMORY_EMBEDDING_BASE_URL` 同样不在 `[memory]` schema 里）：
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `MEMORY_EVOLVE_ENABLED` | `0` | 总开关；false ⇒ 不订阅、不写入、不调模型 |
+| `MEMORY_EVOLVE_LLM_BASE_URL` | 空 | OpenAI 兼容地址，写到 `/v1` 这一级。空 ⇒ 纯规则 |
+| `MEMORY_EVOLVE_LLM_API_KEY_ENV` | `MEMORY_API_KEY` | **变量名**，不是密钥本身；每次调用重读 |
+| `MEMORY_EVOLVE_LLM_MODEL` | 空 | provider 的模型 id；空则退回 `evolve.model`（`"cheap"` 标签），**并打警告** |
+| `MEMORY_EVOLVE_LLM_TIMEOUT_S` | `30` | 单次请求 socket 超时（0.1–120） |
+
+只配 `MEMORY_EVOLVE_ENABLED=1` 而不配 `MEMORY_EVOLVE_LLM_BASE_URL` 时，模块正常启动、
+打一行 `evolve enabled but MEMORY_EVOLVE_LLM_BASE_URL is unset` 警告，然后按纯规则跑。
+超时/重试/降级语义全部在 `evolve/llm.py` 的 `EvolveLLM` 里，`evolve/openai_compat.py`
+只负责「发一次非流式 POST，拿文本或抛错」。
+
 ## 已知限制
 
 1. **SDK 0.1 的私有 RPC/ctx 钩子缺口**：`vade_sdk.transport` 只分发

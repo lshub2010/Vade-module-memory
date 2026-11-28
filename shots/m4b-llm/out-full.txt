@@ -1,0 +1,14 @@
+..................F..................................................... [ 37%]
+........................................................................ [ 75%]
+................................................                         [100%]
+================================== FAILURES ===================================
+__________ test_c12_validates_a_session_record_with_empty_namespace ___________
+
+    def test_c12_validates_a_session_record_with_empty_namespace():
+>       import jsonschema
+E       ModuleNotFoundError: No module named 'jsonschema'
+
+tests\test_contracts.py:65: ModuleNotFoundError
+=========================== short test summary info ===========================
+FAILED tests/test_contracts.py::test_c12_validates_a_session_record_with_empty_namespace
+1 failed, 191 passed in 5.36s
