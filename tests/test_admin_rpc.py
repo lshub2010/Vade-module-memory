@@ -291,3 +291,20 @@ def test_recall_include_session_without_injection_is_an_error(tmp_path):
     assert exc.value.code == "INVALID_ARGUMENT"
     assert "session_id" in exc.value.message
     service.close()
+
+
+def test_admin_list_accepts_float_unix_seconds(tmp_path):
+    """C-08 types `from`/`to` as `number`; a float must not become a 400.
+
+    Regression (post-release review P1-1): core sent `1700000000.0` and the
+    module's integer parser rejected it, so every time-filtered list failed.
+    """
+    service, clock = make_service(tmp_path)
+    service.call_tool("remember", {"text": "时间过滤"})
+    now = int(clock())
+    page = service.handle_rpc(
+        "memory/admin_list",
+        {"from": float(now - 3600), "to": float(now + 3600), "limit": 10},
+    )
+    assert page["items"], page
+    service.close()

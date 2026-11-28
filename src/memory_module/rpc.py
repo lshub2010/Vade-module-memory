@@ -61,11 +61,21 @@ def _optional_bool(value: Any, field: str) -> bool | None:
 
 
 def _optional_int(value: Any, field: str) -> int | None:
+    """Accept an integral JSON number; unix seconds are still integer-valued.
+
+    C-08 declares `from`/`to` as `number`, and a client sending `1.7e9` produced
+    a float that used to be rejected. The contract wins: accept int or float as
+    long as it is finite, and normalise to integer seconds.
+    """
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise MemoryFailure("INVALID_ARGUMENT", f"{field} must be an integer")
-    return value
+    if isinstance(value, bool):
+        raise MemoryFailure("INVALID_ARGUMENT", f"{field} must be a number")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value == value and value not in (float("inf"), float("-inf")):
+        return int(value)
+    raise MemoryFailure("INVALID_ARGUMENT", f"{field} must be a number")
 
 
 def admin_item(rec: MemoryRecord) -> dict[str, Any]:
